@@ -191,9 +191,11 @@ pub fn verify_readable<C: Verification>(
     address: &str,
     msg: &str,
     sig: &str,
-    _network: &str,
+    network: &str,
 ) -> Result<bool, SigningError> {
     // TODO: Validate the address format
+
+    let network = Network::from_str(network).map_err(|_| SigningError::InvalidNetwork)?;
 
     let sig_bytes_full = STANDARD
         .decode(sig)
@@ -213,8 +215,9 @@ pub fn verify_readable<C: Verification>(
 
     let public_key = secp.recover_ecdsa(&msg, &sig_recover)?;
 
-    let expected_address = public_key_to_address(&public_key);
+    let expected_address = public_key_to_address(&public_key, network);
     if address != expected_address {
+        dbg!(expected_address);
         return Err(SigningError::AddressDoesNotMatch);
     }
 
@@ -223,9 +226,9 @@ pub fn verify_readable<C: Verification>(
     Ok(secp.verify_ecdsa(&msg, &sig, &public_key).is_ok())
 }
 
-fn public_key_to_address(public_key: &PublicKey) -> String {
+fn public_key_to_address(public_key: &PublicKey, network: Network) -> String {
     let compressed_public_key = CompressedPublicKey(*public_key);
-    let address = Address::p2wpkh(&compressed_public_key, Network::Testnet);
+    let address = Address::p2wpkh(&compressed_public_key, network);
     address.to_string()
 }
 
@@ -314,12 +317,23 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_readable_address() {
+    fn test_verify_readable_address_testnet3() {
         let msg = "test";
         let signature = "AQAAAAhbufUXmrJ9f6lr4X+ccfrCOi0+Nj19X4YW7btbZDnLhSQ7LPVyRgq1tEx06wvcluO04nsv51Eo5kriSVl/NxJ0";
 
         let address = "tb1q9g6jnlgxu6altezjplk7eyle04qnhrvgadrr65";
-        let network = "Testnet3";
+        let network = "testnet";
+        let result = verify_readable(&Secp256k1::new(), address, msg, signature, network);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_readable_address_mainnet() {
+        let msg = "test";
+        let signature = "AQAAAAhbufUXmrJ9f6lr4X+ccfrCOi0+Nj19X4YW7btbZDnLhSQ7LPVyRgq1tEx06wvcluO04nsv51Eo5kriSVl/NxJ0";
+
+        let address = "bc1q9g6jnlgxu6altezjplk7eyle04qnhrvghtcsp8";
+        let network = "bitcoin";
         let result = verify_readable(&Secp256k1::new(), address, msg, signature, network);
         assert!(result.is_ok());
     }
@@ -334,4 +348,20 @@ mod tests {
         let result = verify_readable(&Secp256k1::new(), address, msg, signature, network);
         assert!(result.is_err());
     }
+
+    /*
+    #[test]
+    fn test_readable_private_key_sign_and_verify_p2sh() {
+        let msg = "test";
+        let private_key = "tprv8kMTe6rSuFZ2N49r6pahMEJSKj6F4DL3jnEmuoySkPVaxCAgD31dRwFaf2W3CBbzBL61xN2ZgNUz1y6vodzhvQRmAuq6WVFzABFjurs2GyX";
+        let signature = sign_readable(&Secp256k1::new(), msg, private_key).unwrap();
+
+        let address = "tb1q9g6jnlgxu6altezjplk7eyle04qnhrvgadrr65";
+        let network = "Testnet3";
+        let result = verify_readable(&Secp256k1::new(), address, msg, &signature, network);
+    }
+    */
+
+    #[test]
+    fn test_readable_private_key_sign_and_verify_p2pkh() {}
 }

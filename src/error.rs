@@ -6,6 +6,9 @@ pub enum SigningError {
     #[error("Invalid address format")]
     InvalidAddressFormat,
 
+    #[error("Invalid network")]
+    InvalidNetwork,
+
     #[error("Base64 decode error: {0}")]
     Base64DecodeError(#[from] base64::DecodeError),
 
