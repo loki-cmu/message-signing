@@ -104,6 +104,15 @@ pub fn verify_recoverable<C: Verification>(
     Ok(secp.verify_ecdsa(&msg, &sig, &pubkey).is_ok())
 }
 
+/*
+0 Legacy (P2PKH)
+4 Nested SegWit (P2SH)
+8 Native SegWit (Bech32)
+ */
+const SCRIPT_TYPE_INFO_P2PKH: u8 = 0;
+const SCRIPT_TYPE_INFO_P2SH: u8 = 4;
+const SCRIPT_TYPE_INFO_BECH32: u8 = 8;
+
 /// Signs a message using the provided secret key in a readable format and returns the signature as a Base64-encoded string.
 ///
 /// # Arguments
@@ -111,7 +120,10 @@ pub fn verify_recoverable<C: Verification>(
 /// * `secp` - A reference to the Secp256k1 context.
 /// * `msg` - The message to be signed as a string.
 /// * `seckey` - The secret key in a readable format (e.g., a string representation of an extended private key).
-///
+/// * `script_type_info` - An identifier for the script type used for the address:
+///   - `0` for Legacy (P2PKH)
+///   - `4` for Nested SegWit (P2SH)
+///   - `8` for Native SegWit
 /// # Returns
 ///
 /// Returns a Result containing the Base64-encoded ECDSA signature or an error.
@@ -119,6 +131,7 @@ pub fn sign_readable<C: Signing>(
     secp: &Secp256k1<C>,
     msg: &str,
     seckey: &str,
+    script_type_info: u8,
 ) -> Result<String, Error> {
     let msg = sha256::Hash::hash(msg.as_bytes());
     let msg = Message::from_digest_slice(msg.as_ref())?;
@@ -126,7 +139,7 @@ pub fn sign_readable<C: Signing>(
     let x_private_key = Xpriv::from_str(seckey).map_err(|_| Error::InvalidSecretKey)?;
     let sig = secp.sign_ecdsa_recoverable(&msg, &x_private_key.private_key);
 
-    let script_type_info: u8 = 8;
+    // let script_type_info: u8 = 8;
     let (recover_id, serialized_sig) = sig.serialize_compact();
     let joint_sig = combine_signature_bytes(recover_id.to_i32(), script_type_info, serialized_sig);
     Ok(STANDARD.encode(&joint_sig))
@@ -201,7 +214,7 @@ pub fn verify_readable<C: Verification>(
         .decode(sig)
         .map_err(SigningError::Base64DecodeError)?;
 
-    let (recover_id, _, sig_bytes) = split_signature_bytes(&sig_bytes_full)
+    let (recover_id, script_type_info, sig_bytes) = split_signature_bytes(&sig_bytes_full)
         .map_err(|err_str| SigningError::InvalidSignatureLength(err_str.to_string()))?;
     let sig_recover = ecdsa::RecoverableSignature::from_compact(
         &sig_bytes,
@@ -215,7 +228,7 @@ pub fn verify_readable<C: Verification>(
 
     let public_key = secp.recover_ecdsa(&msg, &sig_recover)?;
 
-    let expected_address = public_key_to_address(&public_key, network);
+    let expected_address = public_key_to_address(&public_key, network, script_type_info);
     if address != expected_address {
         dbg!(expected_address);
         return Err(SigningError::AddressDoesNotMatch);
@@ -226,10 +239,37 @@ pub fn verify_readable<C: Verification>(
     Ok(secp.verify_ecdsa(&msg, &sig, &public_key).is_ok())
 }
 
-fn public_key_to_address(public_key: &PublicKey, network: Network) -> String {
+fn public_key_to_address(public_key: &PublicKey, network: Network, script_type_info: u8) -> String {
     let compressed_public_key = CompressedPublicKey(*public_key);
-    let address = Address::p2wpkh(&compressed_public_key, network);
-    address.to_string()
+    match script_type_info {
+        SCRIPT_TYPE_INFO_P2PKH => Address::p2pkh(compressed_public_key, network).to_string(),
+        SCRIPT_TYPE_INFO_P2SH => Address::p2shwpkh(&compressed_public_key, network).to_string(),
+        SCRIPT_TYPE_INFO_BECH32 => Address::p2wpkh(&compressed_public_key, network).to_string(),
+        _ => {
+            panic!("Invalid script type info");
+        }
+    }
+}
+
+/// Determines the script type information based on the provided address.
+///
+/// # Arguments
+///
+/// * `address` - The address to be evaluated.
+///
+/// # Returns
+///
+/// script_type_info as u8 or an error if the address format is invalid.
+pub fn address_to_script_type_info(address: &str) -> Result<u8, SigningError> {
+    if address.starts_with("1") {
+        Ok(SCRIPT_TYPE_INFO_P2PKH)
+    } else if address.starts_with("bc1") || address.starts_with("tb1") {
+        Ok(SCRIPT_TYPE_INFO_BECH32)
+    } else if address.starts_with("3") {
+        Ok(SCRIPT_TYPE_INFO_P2SH)
+    } else {
+        Err(SigningError::InvalidAddressFormat)
+    }
 }
 
 #[cfg(test)]
@@ -308,7 +348,8 @@ mod tests {
     fn test_readable_private_key_sign() {
         let msg = "test";
         let private_key = "tprv8kMTe6rSuFZ2N49r6pahMEJSKj6F4DL3jnEmuoySkPVaxCAgD31dRwFaf2W3CBbzBL61xN2ZgNUz1y6vodzhvQRmAuq6WVFzABFjurs2GyX";
-        let signature = sign_readable(&Secp256k1::new(), msg, private_key).unwrap();
+        let signature =
+            sign_readable(&Secp256k1::new(), msg, private_key, SCRIPT_TYPE_INFO_BECH32).unwrap();
 
         assert_eq!(
             "AQAAAAhbufUXmrJ9f6lr4X+ccfrCOi0+Nj19X4YW7btbZDnLhSQ7LPVyRgq1tEx06wvcluO04nsv51Eo5kriSVl/NxJ0",
@@ -349,19 +390,58 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /*
     #[test]
     fn test_readable_private_key_sign_and_verify_p2sh() {
         let msg = "test";
         let private_key = "tprv8kMTe6rSuFZ2N49r6pahMEJSKj6F4DL3jnEmuoySkPVaxCAgD31dRwFaf2W3CBbzBL61xN2ZgNUz1y6vodzhvQRmAuq6WVFzABFjurs2GyX";
-        let signature = sign_readable(&Secp256k1::new(), msg, private_key).unwrap();
+        let signature =
+            sign_readable(&Secp256k1::new(), msg, private_key, SCRIPT_TYPE_INFO_P2SH).unwrap();
 
-        let address = "tb1q9g6jnlgxu6altezjplk7eyle04qnhrvgadrr65";
-        let network = "Testnet3";
+        // address should start with 3
+        let address = "367gqAgkjNCpMybiZbo3B9pGMJmULqqhMT";
+        let network = "bitcoin";
         let result = verify_readable(&Secp256k1::new(), address, msg, &signature, network);
+        assert!(result.is_ok());
     }
-    */
 
     #[test]
-    fn test_readable_private_key_sign_and_verify_p2pkh() {}
+    fn test_readable_private_key_sign_and_verify_p2pkh() {
+        let msg = "test";
+        let private_key = "tprv8kMTe6rSuFZ2N49r6pahMEJSKj6F4DL3jnEmuoySkPVaxCAgD31dRwFaf2W3CBbzBL61xN2ZgNUz1y6vodzhvQRmAuq6WVFzABFjurs2GyX";
+        let signature =
+            sign_readable(&Secp256k1::new(), msg, private_key, SCRIPT_TYPE_INFO_P2PKH).unwrap();
+
+        // address should start with 1
+        let address = "14rB4xYBqBQ5JRvZQMF92jcTBR82JpJ5Yu";
+        let network = "bitcoin";
+        let result = verify_readable(&Secp256k1::new(), address, msg, &signature, network);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_address_to_script_type_info() {
+        let address_str = "14rB4xYBqBQ5JRvZQMF92jcTBR82JpJ5Yu";
+        assert_eq!(
+            SCRIPT_TYPE_INFO_P2PKH,
+            address_to_script_type_info(address_str).unwrap()
+        );
+
+        let address_str = "367gqAgkjNCpMybiZbo3B9pGMJmULqqhMT";
+        assert_eq!(
+            SCRIPT_TYPE_INFO_P2SH,
+            address_to_script_type_info(address_str).unwrap()
+        );
+
+        let address_str = "tb1q9g6jnlgxu6altezjplk7eyle04qnhrvgadrr65";
+        assert_eq!(
+            SCRIPT_TYPE_INFO_BECH32,
+            address_to_script_type_info(address_str).unwrap()
+        );
+
+        let address_str = "bc1q9g6jnlgxu6altezjplk7eyle04qnhrvghtcsp8";
+        assert_eq!(
+            SCRIPT_TYPE_INFO_BECH32,
+            address_to_script_type_info(address_str).unwrap()
+        );
+    }
 }
